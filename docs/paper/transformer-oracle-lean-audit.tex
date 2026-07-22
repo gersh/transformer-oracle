@@ -2,7 +2,7 @@
 
 % ---------------------------------------------------------------------------
 % Formal paper: an independent transformer oracle for auditing native_decide.
-% Build:  pdflatex llmcompiler-lean-audit.tex   (twice, for references)
+% Build:  pdflatex transformer-oracle-lean-audit.tex   (twice, for references)
 % Only standard packages are used so it compiles out of the box.
 % ---------------------------------------------------------------------------
 \usepackage[margin=1in]{geometry}
@@ -37,11 +37,14 @@
 \newcommand{\N}{\mathbb{N}}
 \newcommand{\Z}{\mathbb{Z}}
 \newcommand{\bp}{\{-1,+1\}}
+% double square brackets without depending on stmaryrd (keeps the build package-light)
+\providecommand{\llbracket}{\mathopen{[\![}}
+\providecommand{\rrbracket}{\mathclose{]\!]}}
 \newcommand{\sem}[1]{\llbracket #1 \rrbracket}
 \newcommand{\eval}{\mathcal{E}}
 
 \title{\bfseries An Independent Transformer Oracle for Auditing\\ Lean 4's \texttt{native\_decide}}
-\author{LLMCompiler}
+\author{Transformer-Oracle}
 \date{}
 
 \begin{document}
@@ -52,7 +55,7 @@ Lean~4's \texttt{native\_decide} tactic discharges a decidable proposition by \e
 \texttt{Decidable} instance to native code, executing it, and trusting the result. This is fast, but
 it enlarges the trusted computing base to include the Lean$\to$C compiler, every
 \texttt{@[extern]}/\texttt{@[implemented\_by]} fast path the procedure touches, and the physical CPU.
-We present LLMCompiler, a system that compiles ordinary programs into the weights of a transformer and
+We present Transformer-Oracle, a system that compiles ordinary programs into the weights of a transformer and
 executes them there, and we use it as an \emph{independent execution oracle} to audit
 \texttt{native\_decide}. We give an operational semantics for the target ISA (NISA), show how a
 weight-constructed transformer realises its one-step relation in a bipolar $\bp$ tensor encoding, and
@@ -82,7 +85,7 @@ Lean's axioms \texttt{ofReduceBool} and \texttt{trustCompiler}. If any of them f
 computation, \texttt{native\_decide} can accept a false proposition without any indication.
 
 The contribution of this paper is a practical, \emph{independent} way to check what
-\texttt{native\_decide} actually computed. LLMCompiler lowers C (including the C that Lean emits) to a
+\texttt{native\_decide} actually computed. Transformer-Oracle lowers C (including the C that Lean emits) to a
 small register machine, NISA, and executes NISA on a transformer whose weights are \emph{constructed}
 so that one forward pass performs one instruction. Because that executor shares no code with a
 conventional CPU --- it computes in a bipolar $\bp$ encoding as dense tensor algebra --- running the
@@ -342,7 +345,7 @@ the Dijkstra principle and it dictates the tactics used to enlarge coverage and 
 
 \section{Threat model}\label{sec:threat}
 
-\paragraph{Auditor faults are safe.} A bug anywhere in LLMCompiler --- front end, translator, runtime,
+\paragraph{Auditor faults are safe.} A bug anywhere in Transformer-Oracle --- front end, translator, runtime,
 or executor --- can only make $\eval_{\mathrm{trans}}$ wrong. By Theorem~\ref{thm:sound} the audit
 emits no proof; a faulty auditor yields at worst a spurious disagreement, which is investigated and
 attributed. The system is fail-safe by design: it never certifies.
@@ -362,7 +365,7 @@ cross-architecture layers detect. (This class threatens all machine-checked proo
 on the same silicon; \texttt{native\_decide} is merely more exposed, executing more trusted instructions
 without re-checking.)
 
-\paragraph{Floating point.} IEEE-754 $+,-,\times,\div,\sqrt$ are correctly rounded and hence portable and
+\paragraph{Floating point.} IEEE-754 $+,-,\times,\div,\surd$ are correctly rounded and hence portable and
 reproducible; transcendentals (\texttt{sin},\texttt{exp},\texttt{pow},\dots) are \texttt{libm}-defined
 and \emph{not} portable. Audits of real-valued \texttt{native\_decide} goals must treat only the former
 as cross-platform ground truth, and use interval/ball enclosure for the latter.
@@ -403,7 +406,7 @@ the fast, trusted path has gone wrong.
 \section*{Reproducibility}
 The ISA, pipeline, transformer executor, and the Lean-audit toolkit (mini runtime plus a runnable
 three-way example) accompany this paper. The worked audit is invoked with
-\texttt{python -m llmcompiler.lean\_audit.example\_audit}; the practical guide is
+\texttt{python -m transformer_oracle.lean\_audit.example\_audit}; the practical guide is
 \texttt{docs/auditing-lean-native-decide.md}.
 
 \end{document}

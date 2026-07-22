@@ -1,6 +1,6 @@
 # `lean_audit` — Lean `native_decide` auditing toolkit
 
-Run Lean 4 decision procedures on the LLMCompiler transformer as an **independent execution oracle**,
+Run Lean 4 decision procedures on the Transformer-Oracle transformer as an **independent execution oracle**,
 to cross-check `native_decide` verdicts. See the top-level
 [docs/auditing-lean-native-decide.md](../../docs/auditing-lean-native-decide.md) for the full guide
 and [docs/paper](../../docs/paper) for the mathematics.
@@ -18,11 +18,11 @@ and [docs/paper](../../docs/paper) for the mathematics.
 ## Quick start
 
 ```bash
-python -m llmcompiler.lean_audit.example_audit
+python -m transformer_oracle.lean_audit.example_audit
 ```
 
 ```python
-from llmcompiler.lean_audit.example_audit import audit
+from transformer_oracle.lean_audit.example_audit import audit
 audit(7, 6, 42)     # -> {'transformer': 1, 'python_oracle': 1, 'agree': True}
 audit(7, 6, 41)     # -> {'transformer': 0, 'python_oracle': 0, 'agree': True}  (false prop)
 ```
@@ -33,8 +33,8 @@ Assemble the runtime with `leanrt_source(level)`, write a `_start()` that comput
 value) the `Decidable` instance would compute, and run it on the transformer:
 
 ```python
-from llmcompiler.lean_audit import leanrt_source
-from llmcompiler.compiler.compiler import compile_and_run
+from transformer_oracle.lean_audit import leanrt_source
+from transformer_oracle.compiler.compiler import compile_and_run
 
 # Audit `decide (2^40 % 7 = 4)` over Nat (Lean: Nat.decEq (Nat.mod (2^40) 7) 4).
 src = leanrt_source("nat") + '''

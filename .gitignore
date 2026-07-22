@@ -17,6 +17,16 @@ htmlcov/
 .claude/
 **/.claude/scheduled_tasks.lock
 
+# LaTeX build artifacts (the compiled paper PDF is committed on purpose)
+*.aux
+*.toc
+*.out
+*.log
+*.xdv
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
 # Editor / OS
 .vscode/
 .idea/

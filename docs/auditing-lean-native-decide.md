@@ -1,9 +1,9 @@
 # Auditing Lean 4 `native_decide` with the Transformer Oracle
 
-This guide explains how to use LLMCompiler to audit uses of `native_decide` in Lean code and modules:
+This guide explains how to use Transformer-Oracle to audit uses of `native_decide` in Lean code and modules:
 what the trust gap is, the auditing methodology, and how to run a decision procedure on the
 transformer as an independent check. For the underlying mathematics see the
-[formal paper](paper/llmcompiler-lean-audit.tex).
+[formal paper](paper/transformer-oracle-lean-audit.tex).
 
 ---
 
@@ -40,7 +40,7 @@ We treat the compiled decision procedure as an object to be differentially teste
 | Source | What it is | What it trusts |
 |--------|-----------|----------------|
 | `native_decide` | Lean's compiled `d`, run on the CPU | GCC + fast paths + CPU |
-| **Transformer** | the *same algorithm* re-run on LLMCompiler's bipolar tensor VM | a disjoint compiler + a different executor + (a different device) |
+| **Transformer** | the *same algorithm* re-run on Transformer-Oracle's bipolar tensor VM | a disjoint compiler + a different executor + (a different device) |
 | **Oracle** | a pure, independent implementation of the mathematics (Python `int`, `sympy`, `mpmath`, or Lean `decide` itself) | its own small code |
 
 Agreement across all three is the audit passing. Any disagreement is investigated: it localizes to
@@ -66,8 +66,8 @@ Four complementary tactics, in rough order of power:
 
 Lean emits **C** for a decision procedure (`lean --c` or the `.c` files in a build's
 `build/ir/`). That C uses the Lean runtime ABI: `lean_object*` values, `lean_nat_*`, `lean_int_*`,
-constructor accessors, etc. LLMCompiler ships a **freestanding mini Lean runtime**
-(`llmcompiler/lean_audit/runtime/`) that implements just enough of that ABI to compile and run the
+constructor accessors, etc. Transformer-Oracle ships a **freestanding mini Lean runtime**
+(`transformer_oracle/lean_audit/runtime/`) that implements just enough of that ABI to compile and run the
 emitted C through the `C → RV32I → NISA → transformer` pipeline:
 
 | Header | Provides | Notes |
@@ -86,12 +86,12 @@ the oracle as part of auditing.
 
 ## 4. Worked example
 
-`llmcompiler/lean_audit/example_audit.py` audits `decide (a * b = c)` over `Nat`. Lean would compile
+`transformer_oracle/lean_audit/example_audit.py` audits `decide (a * b = c)` over `Nat`. Lean would compile
 this to `Nat.decEq (Nat.mul a b) c : Bool`; we replicate that with the runtime, run it on the
 transformer, and compare to Python.
 
 ```python
-from llmcompiler.lean_audit.example_audit import audit
+from transformer_oracle.lean_audit.example_audit import audit
 print(audit(2**64 - 59, 2**64 - 83, (2**64 - 59) * (2**64 - 83)))
 # {'proposition': '... = ...', 'transformer': 1, 'python_oracle': 1, 'agree': True}
 ```
@@ -100,7 +100,7 @@ Run the whole demo (note the deliberate *false* cases — they prove the check i
 passing):
 
 ```bash
-python -m llmcompiler.lean_audit.example_audit
+python -m transformer_oracle.lean_audit.example_audit
 ```
 
 Under the hood (`decide_mul_eq`):
@@ -155,4 +155,4 @@ verdict = res.reg(10)                                    # a0 = 1/0
   procedures must be scaled (`max_cycles`, arena size) or reduced to a representative core.
 
 For the formal statement of what a disagreement proves — and the threat model including silent
-hardware faults — see the [paper](paper/llmcompiler-lean-audit.tex), §6–7.
+hardware faults — see the [paper](paper/transformer-oracle-lean-audit.tex), §6–7.

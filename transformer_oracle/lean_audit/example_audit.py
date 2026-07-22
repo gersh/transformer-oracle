@@ -6,7 +6,7 @@ Lean's `native_decide` proves a proposition `P` by *compiling* its `Decidable` i
 code, running it, and trusting that the machine returned `true`. That trust rests on the
 `ofReduceBool` / `trustCompiler` axioms — the compiler + your CPU become part of the trusted base.
 
-This tool re-runs the SAME decision procedure through an INDEPENDENT executor: the LLMCompiler
+This tool re-runs the SAME decision procedure through an INDEPENDENT executor: the Transformer-Oracle
 transformer (C -> RV32I -> NISA -> bipolar tensor VM). We compile a tiny replica of what Lean emits
 for the proposition, execute it on the transformer, and cross-check against a pure-Python oracle.
 
@@ -18,7 +18,7 @@ Agreement across all three is the audit passing. A DISAGREEMENT is a falsifier: 
 compiled decision procedure Lean trusted returned something the math does not support — exactly the
 kind of `native_decide` soundness gap this project hunts for.
 
-Run:  python -m llmcompiler.lean_audit.example_audit
+Run:  python -m transformer_oracle.lean_audit.example_audit
 """
 from ..compiler.compiler import compile_and_run
 from . import leanrt_source

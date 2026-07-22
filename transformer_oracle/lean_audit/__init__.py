@@ -1,15 +1,15 @@
 """Lean `native_decide` auditing toolkit.
 
-Run Lean 4 decision procedures on the LLMCompiler transformer as an independent execution oracle,
+Run Lean 4 decision procedures on the Transformer-Oracle transformer as an independent execution oracle,
 to cross-check `native_decide` verdicts. See ``docs/auditing-lean-native-decide.md``.
 
 The public helper here assembles the freestanding mini Lean runtime as a single C source string.
 ``compile_and_run`` compiles a lone source string (no include path), so the runtime headers — which
 ``#include`` one another — must be flattened before use. ``leanrt_source`` does exactly that:
 
-    >>> from llmcompiler.lean_audit import leanrt_source
+    >>> from transformer_oracle.lean_audit import leanrt_source
     >>> src = leanrt_source("int") + 'int _start(void){ ... }'
-    >>> from llmcompiler.compiler.compiler import compile_and_run
+    >>> from transformer_oracle.compiler.compiler import compile_and_run
     >>> compile_and_run(src, language="c", device="cpu").reg(10)
 """
 import os
