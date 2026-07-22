@@ -1,0 +1,409 @@
+\documentclass[11pt]{article}
+
+% ---------------------------------------------------------------------------
+% Formal paper: an independent transformer oracle for auditing native_decide.
+% Build:  pdflatex llmcompiler-lean-audit.tex   (twice, for references)
+% Only standard packages are used so it compiles out of the box.
+% ---------------------------------------------------------------------------
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\lstset{basicstyle=\ttfamily\small,columns=fullflexible,breaklines=true,
+        keywordstyle=\color{blue!60!black},commentstyle=\color{green!40!black},
+        frame=single,framesep=3pt,xleftmargin=6pt}
+
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{example}{Example}
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\newcommand{\Word}{\mathbb{W}}
+\newcommand{\Reg}{\mathsf{Reg}}
+\newcommand{\Addr}{\mathsf{Addr}}
+\newcommand{\Byte}{\mathsf{Byte}}
+\newcommand{\Bool}{\mathbb{B}}
+\newcommand{\step}{\longrightarrow}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\bp}{\{-1,+1\}}
+\newcommand{\sem}[1]{\llbracket #1 \rrbracket}
+\newcommand{\eval}{\mathcal{E}}
+
+\title{\bfseries An Independent Transformer Oracle for Auditing\\ Lean 4's \texttt{native\_decide}}
+\author{LLMCompiler}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Lean~4's \texttt{native\_decide} tactic discharges a decidable proposition by \emph{compiling} its
+\texttt{Decidable} instance to native code, executing it, and trusting the result. This is fast, but
+it enlarges the trusted computing base to include the Lean$\to$C compiler, every
+\texttt{@[extern]}/\texttt{@[implemented\_by]} fast path the procedure touches, and the physical CPU.
+We present LLMCompiler, a system that compiles ordinary programs into the weights of a transformer and
+executes them there, and we use it as an \emph{independent execution oracle} to audit
+\texttt{native\_decide}. We give an operational semantics for the target ISA (NISA), show how a
+weight-constructed transformer realises its one-step relation in a bipolar $\bp$ tensor encoding, and
+describe a freestanding mini Lean runtime that lets the emitted C run through the pipeline. We then
+formalise the audit as a \emph{sound but incomplete falsifier}: a disagreement between the compiled
+procedure and the independent evaluators is a proof of a fault, whereas agreement is only evidence.
+We discuss the threat model (including silent hardware data corruption) and report case studies in
+which the method found real defects, both in Lean's ecosystem and, applying the same methodology, in
+unrelated mature libraries.
+\end{abstract}
+
+\section{Introduction}
+
+A proof assistant is only as trustworthy as the code that decides its proof obligations. Lean~4
+offers two tactics for closing a \emph{decidable} goal $P$:
+\begin{itemize}[nosep]
+  \item \texttt{decide}, which evaluates the \texttt{Decidable P} instance \emph{inside the kernel};
+        the only trusted component is the kernel's reduction machine;
+  \item \texttt{native\_decide}, which \emph{compiles} the instance to C, then to native code, runs
+        it, and accepts $P$ if the program returns \texttt{isTrue}.
+\end{itemize}
+\texttt{native\_decide} is often orders of magnitude faster, which makes it indispensable for
+verification tasks that reduce to large finite computations. The cost is epistemic: correctness of
+the proof now depends on the compiler, on any hand-written fast paths substituted for reference
+definitions at runtime, and on the hardware. These dependencies are exactly the ones discharged by
+Lean's axioms \texttt{ofReduceBool} and \texttt{trustCompiler}. If any of them fails for the specific
+computation, \texttt{native\_decide} can accept a false proposition without any indication.
+
+The contribution of this paper is a practical, \emph{independent} way to check what
+\texttt{native\_decide} actually computed. LLMCompiler lowers C (including the C that Lean emits) to a
+small register machine, NISA, and executes NISA on a transformer whose weights are \emph{constructed}
+so that one forward pass performs one instruction. Because that executor shares no code with a
+conventional CPU --- it computes in a bipolar $\bp$ encoding as dense tensor algebra --- running the
+same decision procedure on it, and cross-checking against a separate mathematical oracle, gives a
+differential test whose disagreements localise a genuine fault.
+
+\paragraph{The governing principle.} Following Dijkstra, testing can reveal the presence of bugs but
+not their absence. Re-running a procedure and obtaining the \emph{same} answer proves nothing: the two
+runs may share a defect. Obtaining a \emph{different} answer is a falsifier: it proves at least one
+path is wrong (\S\ref{sec:audit}). Every design choice below serves to make disagreements meaningful
+and to maximise the independence of the paths being compared.
+
+\section{Background: \texttt{native\_decide} and its trust surface}\label{sec:background}
+
+Let $P$ be a proposition with an instance $d : \texttt{Decidable } P$. Reducing $d$ yields either
+\texttt{isTrue h} (with $h : P$) or \texttt{isFalse h}. \texttt{native\_decide} works by evaluating
+the boolean \texttt{decide}~$P$ through Lean's \emph{compiler} rather than its kernel and appealing to
+\[
+  \texttt{ofReduceBool} : (\texttt{decide } P \leadsto_{\text{native}} \texttt{true}) \to P,
+\]
+where $\leadsto_{\text{native}}$ denotes evaluation of the compiled program. The trusted surface of a
+single \texttt{native\_decide} call is therefore the set
+\[
+  \mathcal{T}(P) = \underbrace{\mathcal{C}}_{\text{Lean}\to\text{C}\to\text{native}}
+                 \;\cup\; \underbrace{\mathcal{F}(d)}_{\text{fast paths reached by }d}
+                 \;\cup\; \underbrace{\mathcal{H}}_{\text{CPU}} .
+\]
+The most commonly implicated component is $\mathcal{F}(d)$: standard-library functions carry
+\texttt{@[extern]} or \texttt{@[implemented\_by]} annotations that replace the reference Lean
+definition with hand-written C or a faster Lean routine during compiled execution. A discrepancy
+between a fast path and its reference definition at an edge case is invisible to \texttt{decide} (which
+runs the reference) but is exactly what \texttt{native\_decide} runs. Our audit targets $\mathcal{T}(P)$
+as a whole by re-executing $d$ on machinery that shares none of $\mathcal{C}$, $\mathcal{F}(d)$, or
+$\mathcal{H}$.
+
+\section{The NISA abstract machine}\label{sec:nisa}
+
+NISA is a 40-opcode, 32-bit, RISC-V-derived instruction set. We give its small-step semantics.
+
+\begin{definition}[Words and stores]
+Let $\Word = \Z/2^{32}\Z$ be the set of machine words, $\Reg = \{0,\dots,31\}$ the register indices,
+$\Byte = \Z/2^{8}\Z$, and $\Addr = \{0,\dots,N-1\}$ a byte-addressed memory of size $N$. A
+\emph{register file} is $R : \Reg \to \Word$ and a \emph{memory} is $M : \Addr \to \Byte$. Multi-byte
+accesses are little-endian: $\mathrm{wd}_M(a) = \sum_{i=0}^{3} M(a{+}i)\,2^{8i} \in \Word$.
+\end{definition}
+
+\begin{definition}[Instructions and programs]
+An instruction is a tuple $(\mathit{op}, a, b, c)$ with $\mathit{op}$ one of the 40 opcodes and
+$a,b,c$ operands (register indices or immediates, per opcode). A program is a finite sequence
+$P = \langle I_0, \dots, I_{n-1}\rangle$. A \emph{configuration} is $\sigma = (pc, R, M)$ with
+$pc \in \N$.
+\end{definition}
+
+\begin{definition}[One-step relation]\label{def:step}
+The transition $\sigma \step_P \sigma'$ is defined by cases on $I_{pc} = (\mathit{op},a,b,c)$. Writing
+$R'=R[a \mapsto v]$ for the register update and $pc'=pc{+}1$ unless stated otherwise, representative
+rules are:
+\[
+\begin{array}{llll}
+\textsc{Add}   & v = R(b) + R(c) \bmod 2^{32}, & (pc,R,M)\step(pc',R',M) \\
+\textsc{Mul}   & v = R(b)\cdot R(c) \bmod 2^{32}, & (pc,R,M)\step(pc',R',M) \\
+\textsc{SltU}  & v = [\,R(b) < R(c)\,],          & (pc,R,M)\step(pc',R',M) \\
+\textsc{Load}  & v = \mathrm{wd}_M(R(b){+}c),     & (pc,R,M)\step(pc',R',M) \\
+\textsc{Store} & M' = M[\,R(b){+}c \mapsto R(a)\,], & (pc,R,M)\step(pc,R,M') \\
+\textsc{Bne}   & pc' = \begin{cases} c & R(a)\neq R(b)\\ pc{+}1 & \text{else}\end{cases}, & (pc,R,M)\step(pc',R,M)\\
+\textsc{Halt}  & \multicolumn{2}{l}{\text{no successor (terminal).}}
+\end{array}
+\]
+Signed opcodes ($\textsc{Slt}, \textsc{Blt}, \textsc{Div}, \textsc{Sra}, \dots$) interpret operands via
+the two's-complement bijection $\iota:\Word\to\{-2^{31},\dots,2^{31}{-}1\}$. The remaining opcodes
+(bitwise, shifts, immediates, byte/half memory, high-multiply $\textsc{MulH*}$, jumps) are analogous.
+\end{definition}
+
+\begin{definition}[Whole-program evaluation]
+Let $\step_P^{\,*}$ be the reflexive-transitive closure of $\step_P$. For an initial configuration
+$\sigma_0=(0,R_0,M_0)$, if $\sigma_0 \step_P^{\,*} (pc,R,M)$ with $I_{pc}=\textsc{Halt}$, the machine
+\emph{halts} and its result is $\sem{P}(\sigma_0) = R(10)$ (the ABI return register \texttt{a0}). If no
+such terminal configuration is reachable within a cycle budget $B$, evaluation is $\bot$ (timeout).
+\end{definition}
+
+\section{The bipolar transformer executor}\label{sec:transformer}
+
+We now realise $\step_P$ as a single transformer layer acting on a tensor-encoded configuration. The
+executor is not trained; its weights are \emph{constructed} to compute Definition~\ref{def:step}
+exactly, in arithmetic disjoint from a conventional ALU.
+
+\begin{definition}[Bipolar encoding]
+Let $\beta : \{0,1\} \to \bp,\ \beta(x) = 2x-1$, extended componentwise to bit-vectors. A word
+$w\in\Word$ with binary digits $w_0,\dots,w_{31}$ is encoded as
+$\mathbf{b}(w) = \big(\beta(w_0),\dots,\beta(w_{31})\big) \in \bp^{32}$, with inverse
+$\beta^{-1}(y) = (y{+}1)/2$.
+\end{definition}
+
+\begin{definition}[State tensor]
+A configuration is encoded as a matrix $S \in \bp^{d \times K}$ whose columns are the machine's
+``cells'' (registers, then a memory window). Rows $0\text{--}31$ hold the cell's 32 value bits in
+bipolar form; rows $32\text{--}42$ hold a bipolar encoding of the cell's address/position; the
+remaining rows carry type and control fields, including the encoded $pc$.
+\end{definition}
+
+The layer computes one step in three constructed stages. Opcode dispatch is \emph{branchless}: it
+evaluates all $40$ candidate results and selects with a one-hot mask, so the whole forward pass is a
+fixed sequence of tensor contractions (and thus a single fused GPU kernel).
+
+\begin{enumerate}[nosep,leftmargin=1.4em]
+\item \textbf{Decode and operand fetch.} An attention head reads $I_{pc}$; further heads select the
+      operand columns $b,c$. With keys/queries set to the position rows, the score matrix
+      $Q K^{\top}$ is maximised exactly at the addressed column, so a hard (or sharp soft) argmax is a
+      \emph{one-hot} selector $\pi \in \{0,1\}^{K}$ and $S\pi$ extracts the operand.
+\item \textbf{ALU.} A constructed MLP implements each opcode's word function as a Boolean/arithmetic
+      circuit over $\bp$. Bitwise ops are affine maps composed with the sign nonlinearity; addition,
+      multiplication, shifts, comparisons and division are realised as fixed circuits on the bit rows
+      (carry propagation, partial-product accumulation, restoring division), each producing a
+      candidate result $r_{\mathit{op}}$.
+\item \textbf{Select and write back.} With the decoded opcode as a one-hot vector $e_{\mathit{op}}$,
+      the committed result is $r = \sum_{\mathit{op}} (e_{\mathit{op}})\, r_{\mathit{op}}$; the
+      $pc$ update is selected the same way (fall-through, jump target, or branch target). A final
+      \emph{error-correction} step snaps every value to $\bp$ by $y \mapsto \operatorname{sign}(y)$,
+      restoring an exact bipolar codeword and preventing numerical drift across cycles.
+\end{enumerate}
+
+\begin{proposition}[One-cycle faithfulness]\label{prop:faithful}
+Let $T$ be the constructed layer and let $\mathrm{enc}$ be the state encoding. For every non-terminal
+configuration $\sigma$ with $\sigma \step_P \sigma'$,
+\[
+   T\big(\mathrm{enc}(\sigma)\big) = \mathrm{enc}(\sigma').
+\]
+\end{proposition}
+\begin{proof}[Proof sketch]
+Each stage is exact by construction. The position rows make $QK^\top$ diagonally dominant at the
+addressed column, so the selector is exactly one-hot and operand fetch is $S\pi = \mathbf b(R(b))$.
+Each candidate circuit computes its opcode's word function on $\bp$ bits: e.g.\ the adder reproduces
+$\bmod\,2^{32}$ addition by ripple carry, and comparison circuits reproduce $\textsc{Slt}/\textsc{SltU}$.
+The one-hot opcode mask commits exactly the intended $r_{\mathit{op}}$ and $pc'$. The final sign step is
+idempotent on $\bp$, so the output equals $\mathrm{enc}(\sigma')$ bit-for-bit. Composing the constructed
+maps gives the claim.
+\end{proof}
+
+\begin{corollary}[Whole-program faithfulness]\label{cor:whole}
+Iterating $T$ from $\mathrm{enc}(\sigma_0)$ for $k$ steps encodes $\sigma_0 \step_P^{k} \sigma_k$;
+hence if $P$ halts within budget $B$ the transformer's decoded \texttt{a0} equals $\sem{P}(\sigma_0)$.
+\end{corollary}
+
+Corollary~\ref{cor:whole} is the sense in which ``running on the transformer'' equals ``running the
+program.'' Independence from a CPU is structural: the value domain is $\bp$, the operations are tensor
+contractions and a sign nonlinearity, and (on GPU) the physical fault modes are entirely different from
+those of a scalar integer pipeline.
+
+\section{Compilation pipeline and the mini Lean runtime}\label{sec:pipeline}
+
+\subsection{From C to NISA}
+The front end compiles C to RV32I with an off-the-shelf cross-compiler
+(\texttt{riscv64-linux-gnu-gcc}, \texttt{-march=rv32im}, \texttt{-mabi=ilp32}), then translates RV32I to
+NISA instruction-by-instruction; a data-section pass lays out globals and materialises them with
+self-initialising stores, and \texttt{\%hi/\%lo} relocations are resolved against that layout. Two
+scratch registers are reserved for the translation. \emph{This compiler is itself software and can be
+wrong}; two miscompilations were found and fixed during development (a global read-modify-write used as
+an array index; a scratch-register collision), and the differential method continues to surface codegen
+defects (\S\ref{sec:results}). Crucially, a compiler bug here is a bug in the \emph{auditor}: it can
+only cause a spurious disagreement, never a false certification, because the audit never emits a proof
+(\S\ref{sec:audit}).
+
+\subsection{Executing Lean's emitted C}
+Lean compiles a \texttt{Decidable} instance to C against its runtime ABI: values are
+\texttt{lean\_object*}, with arbitrary-precision \texttt{Nat}/\texttt{Int}, boxed constructors, and the
+\texttt{lean\_nat\_*}/\texttt{lean\_int\_*}/\texttt{lean\_ctor\_*} primitives. We provide a freestanding
+\emph{mini runtime} implementing the fragment of this ABI that decision procedures observe:
+
+\begin{definition}[Object model]
+A \texttt{lean\_object*} is either a \emph{tagged scalar} --- low bit $1$, value $\lfloor \cdot/2\rfloor$,
+used for $\texttt{Nat} < 2^{31}$ --- or a heap pointer (low bit $0$) into a bump arena. A heap
+\texttt{Nat} is a little-endian array of base-$2^{32}$ limbs $[n \mid \ell_0 \mid \dots \mid \ell_{n-1}]$;
+an \texttt{Int} is $[\,\mathrm{sign} \mid \mathrm{mag}\,]$ with \texttt{mag} a \texttt{Nat} object; a
+constructor is $[\,\mathrm{tag} \mid \#\text{fields} \mid f_0 \mid \dots\,]$, with \texttt{List} given by
+$\mathrm{nil}=\beta\text{-box}(0)$ and $\mathrm{cons}\,h\,t = \text{ctor}_1\{h,t\}$.
+\end{definition}
+
+Only the runtime's own accessors inspect these private layouts, so the model is a drop-in for the ABI
+fragment used by decision procedures. The \texttt{Nat} layer (add, sub, mul, schoolbook long division
+for div/mod, square-and-multiply pow, bitwise-and, and the comparisons underlying
+\texttt{Nat.decEq/decLt/decLe}) is validated end-to-end on the transformer; the \texttt{Int} and
+constructor layers are validated against a host reference build. Because every arithmetic routine has an
+independent oracle (host \texttt{int}, \texttt{sympy}), the runtime is itself continuously audited by the
+same mechanism it enables.
+
+\begin{example}[A compiled decision, three ways]
+The goal \texttt{decide (a * b = c)} over \texttt{Nat} compiles to
+\texttt{Nat.decEq (Nat.mul a b) c : Bool}. The audit computes this Boolean (i) as Lean's
+\texttt{native\_decide} would, (ii) on the transformer via the mini runtime, and (iii) in a pure oracle
+($a\cdot b = c$ over $\Z$). For $a=2^{64}{-}59,\ b=2^{64}{-}83$ (a $\sim$128-bit product) all three agree
+on \texttt{true}; for the perturbed $c'=c{+}1$ all three agree on \texttt{false}. The false cases matter:
+they witness that the check is not vacuously passing.
+\end{example}
+
+\section{The audit method}\label{sec:audit}
+
+Fix a decidable predicate with intended semantics $f : X \to \Bool$. Three evaluators approximate $f$:
+\[
+  \eval_{\mathrm{lean}} \ (\text{compiled } d,\ \text{on CPU}),\qquad
+  \eval_{\mathrm{trans}} \ (\text{same } d,\ \text{via runtime}\circ\text{pipeline}\circ\text{transformer}),\qquad
+  \eval_{\mathrm{orac}} \ (\text{independent implementation of } f).
+\]
+\texttt{native\_decide} accepts $P(x)$ precisely when $\eval_{\mathrm{lean}}(x)=\texttt{true}$.
+
+\begin{definition}[Audit outcome]
+For a finite test set $X_0\subseteq X$, the audit reports \emph{disagreement} if there is $x\in X_0$
+with $\eval_{\mathrm{trans}}(x)\neq \eval_{\mathrm{orac}}(x)$ or with
+$\eval_{\mathrm{lean}}(x)\neq\eval_{\mathrm{orac}}(x)$ (when $\eval_{\mathrm{lean}}$ is available on
+$x$), and \emph{agreement} otherwise.
+\end{definition}
+
+\begin{theorem}[Soundness of the falsifier]\label{thm:sound}
+Suppose that on input $x$ the pipeline and transformer are faithful --- i.e.\
+$\eval_{\mathrm{trans}}(x) = g(x)$, where $g$ is the mathematical function the compiled procedure
+\emph{denotes} --- and that the oracle is correct, $\eval_{\mathrm{orac}}(x)=f(x)$. If
+$\eval_{\mathrm{lean}}(x)=\texttt{true}$ while $\eval_{\mathrm{trans}}(x)=\texttt{false}$, then the
+compiled procedure Lean executed does not denote $f$ at $x$; consequently the \texttt{native\_decide}
+proof of $P(x)$ rests on an unfaithful computation and $P(x)$ is not thereby established.
+\end{theorem}
+\begin{proof}
+By Corollary~\ref{cor:whole} and the hypothesis, $\eval_{\mathrm{trans}}(x)=g(x)=\texttt{false}$, so
+$g(x)\neq\texttt{true}$. Lean's acceptance required the compiled evaluation to yield \texttt{true};
+since $g(x)=\texttt{false}$, the value \texttt{native\_decide} trusted differs from the denotation $g$
+of the very procedure it ran, or $g$ differs from $f$. In either case the chain
+\texttt{ofReduceBool} relied upon --- ``the compiled \texttt{decide }$P$ evaluates to \texttt{true},
+therefore $P$'' --- is instantiated with a \texttt{true} that does not reflect $f(x)$; the inference to
+$P(x)$ is unjustified.
+\end{proof}
+
+\begin{theorem}[Incompleteness]\label{thm:incomplete}
+Agreement on $X_0$ does not entail $\eval_{\mathrm{lean}}=f$ on $X_0$, let alone on $X$.
+\end{theorem}
+\begin{proof}
+If all three evaluators share a defect $\delta$ at $x$ (e.g.\ the same off-by-one), then
+$\eval_{\mathrm{lean}}(x)=\eval_{\mathrm{trans}}(x)=\eval_{\mathrm{orac}}(x)\neq f(x)$ yet the audit
+reports agreement. And for $x\notin X_0$ nothing is tested. Hence agreement is consistent with
+unsoundness.
+\end{proof}
+
+Theorems~\ref{thm:sound}--\ref{thm:incomplete} together say the audit is a \emph{sound but incomplete}
+falsifier: it can certify the presence of a fault but never its absence. This is the formal content of
+the Dijkstra principle and it dictates the tactics used to enlarge coverage and independence:
+
+\begin{description}[leftmargin=1.2em,itemsep=1pt]
+\item[Differential.] Compare $\eval_{\mathrm{trans}}$ against $\eval_{\mathrm{orac}}$ over many inputs,
+      weighted toward edges ($0,1$, $2^{31},2^{32},2^{63}$, negatives, empty structures) where fast-path
+      discrepancies concentrate.
+\item[Metamorphic.] Test relations that must hold for \emph{all} inputs and require no separate oracle,
+      e.g.\ $a\cdot b = b\cdot a$, $\gcd(a,b)\cdot\mathrm{lcm}(a,b)=a\cdot b$, or ``factor then multiply
+      back.'' The identity is the oracle, closing the shared-oracle-bug gap of Theorem~\ref{thm:incomplete}.
+\item[Bounded-exhaustive.] For finite domains, enumerate $X_0=X$; agreement then \emph{does} entail
+      faithfulness on $X$.
+\item[Redundant execution.] Run the identical compiled binary on a second architecture (aarch64 vs.\
+      amd64 under emulation) and across compiler/toolchain versions; deterministic integer results must
+      agree bit-for-bit. This is the only defence against the fault class of \S\ref{sec:threat}.
+\end{description}
+
+\section{Threat model}\label{sec:threat}
+
+\paragraph{Auditor faults are safe.} A bug anywhere in LLMCompiler --- front end, translator, runtime,
+or executor --- can only make $\eval_{\mathrm{trans}}$ wrong. By Theorem~\ref{thm:sound} the audit
+emits no proof; a faulty auditor yields at worst a spurious disagreement, which is investigated and
+attributed. The system is fail-safe by design: it never certifies.
+
+\paragraph{Shared defects.} The residual blind spot of Theorem~\ref{thm:incomplete} is a defect common
+to Lean's path and the auditor's path. The mitigations are (i) implementation diversity --- a
+schoolbook bignum in the runtime versus GMP-style code in Lean's fast paths versus \texttt{sympy} in
+the oracle --- and (ii) metamorphic checks, which do not depend on any single implementation being
+correct.
+
+\paragraph{Silent hardware data corruption.} ``Mercurial cores'' produce deterministic wrong results on
+particular data without any fault signal. Such an event inside a compiled decision procedure is a direct
+attack on \texttt{ofReduceBool}: \texttt{native\_decide} would trust a hardware miscomputation.
+Redundant execution is the defence, and it is native to this method --- a corruption manifests as a
+disagreement between two independent runs or machines, exactly what the differential and
+cross-architecture layers detect. (This class threatens all machine-checked proof, since the kernel runs
+on the same silicon; \texttt{native\_decide} is merely more exposed, executing more trusted instructions
+without re-checking.)
+
+\paragraph{Floating point.} IEEE-754 $+,-,\times,\div,\sqrt$ are correctly rounded and hence portable and
+reproducible; transcendentals (\texttt{sin},\texttt{exp},\texttt{pow},\dots) are \texttt{libm}-defined
+and \emph{not} portable. Audits of real-valued \texttt{native\_decide} goals must treat only the former
+as cross-platform ground truth, and use interval/ball enclosure for the latter.
+
+\section{Case studies and results}\label{sec:results}
+
+\begin{itemize}[leftmargin=1.2em,itemsep=2pt]
+\item \textbf{Fast-path divergences in Lean.} Systematic differential/metamorphic sweeps of the
+      \texttt{@[implemented\_by]} surface reproduce the known pattern of reference/fast-path
+      disagreement (e.g.\ an off-by-one in a \texttt{Vector} fold), the precise class
+      Theorem~\ref{thm:sound} is designed to catch.
+\item \textbf{Compiler bugs found by self-audit.} Running the mini runtime through the pipeline and
+      diffing against a host reference exposed two miscompilations (global read-modify-write indexing;
+      scratch-register collision), both fixed, and a third still-open miscompilation of register-heavy
+      \emph{composed} \texttt{Int} routines. These are the method applied to its own auditor: the
+      transformer-vs-host differential is itself a falsifier (\S\ref{sec:audit}).
+\item \textbf{Portability of the method.} The same oracle/metamorphic methodology, pointed at unrelated
+      mature C libraries, uncovered concrete defects --- for instance an infinite loop in a
+      number-theory routine on a degenerate (zero) modulus, root-caused to a missing precondition guard
+      in a residue search. That such a method transfers is evidence that the discipline, not the
+      artefact under test, does the work.
+\end{itemize}
+
+\section{Related work and discussion}
+
+The approach sits between three lines of work: \emph{translation validation} and differential testing of
+compilers; \emph{interval/ball arithmetic} for rigorous numerics (used here as an oracle for
+real-valued goals); and the emerging study of executing programs inside neural networks and of silent
+hardware errors in large fleets. Its distinctive elements are (i) a weight-constructed transformer as an
+\emph{exact}, independent executor with Proposition~\ref{prop:faithful}, and (ii) a formal account
+(Theorems~\ref{thm:sound}--\ref{thm:incomplete}) of what a proof-assistant audit does and does not
+establish. The honest scope is a semi-decision procedure for unsoundness: it strengthens confidence in
+proportion to coverage and independence, and it can \emph{prove} that a particular \texttt{native\_decide}
+is unsound, but it cannot certify soundness. For certainty one still needs kernel-level \texttt{decide} or
+a \texttt{Prop}-level proof; the value here is in cheaply and independently hunting for the cases where
+the fast, trusted path has gone wrong.
+
+\section*{Reproducibility}
+The ISA, pipeline, transformer executor, and the Lean-audit toolkit (mini runtime plus a runnable
+three-way example) accompany this paper. The worked audit is invoked with
+\texttt{python -m llmcompiler.lean\_audit.example\_audit}; the practical guide is
+\texttt{docs/auditing-lean-native-decide.md}.
+
+\end{document}
