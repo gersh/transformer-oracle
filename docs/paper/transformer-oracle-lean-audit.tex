@@ -62,14 +62,16 @@ weight-constructed transformer realises its one-step relation in a bipolar $\bp$
 describe a freestanding mini Lean runtime that lets the emitted C run through the pipeline. We then
 formalise the audit as a \emph{sound but incomplete falsifier}: a disagreement between the compiled
 procedure and the independent evaluators is a proof of a fault, whereas agreement is only evidence.
-We discuss the threat model (including silent hardware data corruption) and report case studies in
-which the method found real defects, both in Lean's ecosystem and, applying the same methodology, in
-unrelated mature libraries.
+As the method's flagship result we highlight a confirmed soundness bug in the Batteries library's
+\texttt{Vector.scanr} fast path---an off-by-one that lets \texttt{native\_decide} prove
+\texttt{False}, reported upstream as Batteries issue~\#1924~\cite{batteries1924}---and, applying the
+same methodology, defects in unrelated mature libraries. We close with the threat model, including
+silent hardware data corruption.
 \end{abstract}
 
 \section{Introduction}
 
-A proof assistant is only as trustworthy as the code that decides its proof obligations. Lean~4
+A proof assistant is only as trustworthy as the code that decides its proof obligations. Lean~4~\cite{demoura2021}
 offers two tactics for closing a \emph{decidable} goal $P$:
 \begin{itemize}[nosep]
   \item \texttt{decide}, which evaluates the \texttt{Decidable P} instance \emph{inside the kernel};
@@ -86,13 +88,17 @@ computation, \texttt{native\_decide} can accept a false proposition without any 
 
 The contribution of this paper is a practical, \emph{independent} way to check what
 \texttt{native\_decide} actually computed. Transformer-Oracle lowers C (including the C that Lean emits) to a
-small register machine, NISA, and executes NISA on a transformer whose weights are \emph{constructed}
-so that one forward pass performs one instruction. Because that executor shares no code with a
-conventional CPU --- it computes in a bipolar $\bp$ encoding as dense tensor algebra --- running the
-same decision procedure on it, and cross-checking against a separate mathematical oracle, gives a
+small register machine, NISA, and executes NISA on a transformer whose weights are \emph{constructed},
+not trained, so that one forward pass performs one instruction. Constructing rather than learning
+transformer weights to realise a program is the premise of \emph{compiled transformers}---RASP and its
+compiler Tracr, and looped transformers used as programmable computers~\cite{weiss2021,lindner2023,giannou2023};
+we take it further, compiling an entire C toolchain's output down to a transformer and using the result
+as a trusted-independent executor. Because that executor shares no code with a conventional CPU --- it
+computes in a bipolar $\bp$ encoding as dense tensor algebra~\cite{vaswani2017} --- running the same
+decision procedure on it, and cross-checking against a separate mathematical oracle, gives a
 differential test whose disagreements localise a genuine fault.
 
-\paragraph{The governing principle.} Following Dijkstra, testing can reveal the presence of bugs but
+\paragraph{The governing principle.} Following Dijkstra~\cite{dijkstra1970}, testing can reveal the presence of bugs but
 not their absence. Re-running a procedure and obtaining the \emph{same} answer proves nothing: the two
 runs may share a defect. Obtaining a \emph{different} answer is a falsifier: it proves at least one
 path is wrong (\S\ref{sec:audit}). Every design choice below serves to make disagreements meaningful
@@ -170,7 +176,10 @@ such terminal configuration is reachable within a cycle budget $B$, evaluation i
 
 We now realise $\step_P$ as a single transformer layer acting on a tensor-encoded configuration. The
 executor is not trained; its weights are \emph{constructed} to compute Definition~\ref{def:step}
-exactly, in arithmetic disjoint from a conventional ALU.
+exactly, in arithmetic disjoint from a conventional ALU. This continues the compiled-transformer line
+of work~\cite{weiss2021,lindner2023,giannou2023}, which establishes that transformer weights can be set
+by hand to execute symbolic programs; our contribution is to make the executed program an arbitrary
+compiled binary and to put the resulting exactness to use as an audit oracle.
 
 \begin{definition}[Bipolar encoding]
 Let $\beta : \{0,1\} \to \bp,\ \beta(x) = 2x-1$, extended componentwise to bit-vectors. A word
@@ -330,10 +339,10 @@ falsifier: it can certify the presence of a fault but never its absence. This is
 the Dijkstra principle and it dictates the tactics used to enlarge coverage and independence:
 
 \begin{description}[leftmargin=1.2em,itemsep=1pt]
-\item[Differential.] Compare $\eval_{\mathrm{trans}}$ against $\eval_{\mathrm{orac}}$ over many inputs,
+\item[Differential.] Compare $\eval_{\mathrm{trans}}$ against $\eval_{\mathrm{orac}}$ over many inputs~\cite{mckeeman1998,yang2011},
       weighted toward edges ($0,1$, $2^{31},2^{32},2^{63}$, negatives, empty structures) where fast-path
       discrepancies concentrate.
-\item[Metamorphic.] Test relations that must hold for \emph{all} inputs and require no separate oracle,
+\item[Metamorphic~\cite{chen1998}.] Test relations that must hold for \emph{all} inputs and require no separate oracle,
       e.g.\ $a\cdot b = b\cdot a$, $\gcd(a,b)\cdot\mathrm{lcm}(a,b)=a\cdot b$, or ``factor then multiply
       back.'' The identity is the oracle, closing the shared-oracle-bug gap of Theorem~\ref{thm:incomplete}.
 \item[Bounded-exhaustive.] For finite domains, enumerate $X_0=X$; agreement then \emph{does} entail
@@ -356,7 +365,7 @@ schoolbook bignum in the runtime versus GMP-style code in Lean's fast paths vers
 the oracle --- and (ii) metamorphic checks, which do not depend on any single implementation being
 correct.
 
-\paragraph{Silent hardware data corruption.} ``Mercurial cores'' produce deterministic wrong results on
+\paragraph{Silent hardware data corruption.} ``Mercurial cores''~\cite{hochschild2021,dixit2021} produce deterministic wrong results on
 particular data without any fault signal. Such an event inside a compiled decision procedure is a direct
 attack on \texttt{ofReduceBool}: \texttt{native\_decide} would trust a hardware miscomputation.
 Redundant execution is the defence, and it is native to this method --- a corruption manifests as a
@@ -368,15 +377,40 @@ without re-checking.)
 \paragraph{Floating point.} IEEE-754 $+,-,\times,\div,\surd$ are correctly rounded and hence portable and
 reproducible; transcendentals (\texttt{sin},\texttt{exp},\texttt{pow},\dots) are \texttt{libm}-defined
 and \emph{not} portable. Audits of real-valued \texttt{native\_decide} goals must treat only the former
-as cross-platform ground truth, and use interval/ball enclosure for the latter.
+as cross-platform ground truth, and use interval/ball enclosure~\cite{johansson2017} for the latter.
 
 \section{Case studies and results}\label{sec:results}
 
+\subsection{A concrete \texttt{native\_decide} unsoundness: \texttt{Vector.scanr}}\label{sec:scanr}
+
+The method's flagship result is a confirmed soundness bug in the Batteries library, filed upstream as
+issue~\#1924~\cite{batteries1924}. The reference definition of \texttt{Vector.scanrM} is correct, but
+its compiled replacement \texttt{@[implemented\_by] scanrMFast} contains an off-by-one: the inner loop
+executes \texttt{acc.uset pred cur}, storing the \emph{old} accumulator, where it must store the freshly
+computed value (\texttt{acc.uset pred next}). Every entry is therefore computed but written one slot too
+late. Concretely, for $\texttt{scanr}\ (\cdot{+}\cdot)\ 0\ [1,2,3]$ the kernel reduces the reference to
+the correct $[6,5,3,0]$, while the compiled fast path---the one \texttt{native\_decide} executes---yields
+$[5,3,0,0]$.
+
+Because \texttt{decide} reduces the reference definition while \texttt{native\_decide} runs the fast
+path, the two disagree on a \emph{decidable equality}, and one can derive \texttt{False} using no axioms
+beyond those \texttt{native\_decide} already assumes (\texttt{ofReduceBool}, \texttt{trustCompiler}). This
+is exactly the configuration of Theorem~\ref{thm:sound}: an independent evaluation---here the kernel, and
+equally the transformer running the reference \texttt{scanr}---exhibits a value the compiled procedure
+does not, proving the compiled artefact unfaithful and any \texttt{native\_decide} proof that relies on it
+unsound. The defect lives precisely in the \texttt{@[implemented\_by]} trust surface of
+\S\ref{sec:background}, which every downstream project inherits.
+
+A systematic differential/metamorphic sweep of the value-reachable
+\texttt{@[implemented\_by]}/\texttt{@[extern]} surface of Lean core and Batteries (several thousand cases
+over sorting, \texttt{BitVec} arithmetic, \texttt{Nat}/\texttt{Int} bit and division operations, slicing
+and indexing, order-sensitive folds and scans, and hash maps/trees) found \texttt{Vector.scanr} to be the
+\emph{sole} divergence---consistent with the principle (\S\ref{sec:background}) that only the fast-path
+surface, never a pure Lean definition, can produce a \texttt{native\_decide} soundness bug.
+
+\subsection{Further results}
+
 \begin{itemize}[leftmargin=1.2em,itemsep=2pt]
-\item \textbf{Fast-path divergences in Lean.} Systematic differential/metamorphic sweeps of the
-      \texttt{@[implemented\_by]} surface reproduce the known pattern of reference/fast-path
-      disagreement (e.g.\ an off-by-one in a \texttt{Vector} fold), the precise class
-      Theorem~\ref{thm:sound} is designed to catch.
 \item \textbf{Compiler bugs found by self-audit.} Running the mini runtime through the pipeline and
       diffing against a host reference exposed two miscompilations (global read-modify-write indexing;
       scratch-register collision), both fixed, and a third still-open miscompilation of register-heavy
@@ -391,10 +425,13 @@ as cross-platform ground truth, and use interval/ball enclosure for the latter.
 
 \section{Related work and discussion}
 
-The approach sits between three lines of work: \emph{translation validation} and differential testing of
-compilers; \emph{interval/ball arithmetic} for rigorous numerics (used here as an oracle for
-real-valued goals); and the emerging study of executing programs inside neural networks and of silent
-hardware errors in large fleets. Its distinctive elements are (i) a weight-constructed transformer as an
+The approach sits between four lines of work: \emph{translation validation}~\cite{pnueli1998} and
+differential testing of compilers~\cite{mckeeman1998,yang2011} (with formally verified compilation,
+e.g.\ CompCert~\cite{leroy2009}, as the complementary ``prove it once'' alternative); \emph{compiled
+transformers}~\cite{weiss2021,lindner2023,giannou2023}, which construct transformer weights to execute
+symbolic programs; \emph{interval/ball arithmetic} for rigorous numerics~\cite{johansson2017} (used here
+as an oracle for real-valued goals); and the study of silent hardware errors in large
+fleets~\cite{hochschild2021,dixit2021}. Its distinctive elements are (i) a weight-constructed transformer as an
 \emph{exact}, independent executor with Proposition~\ref{prop:faithful}, and (ii) a formal account
 (Theorems~\ref{thm:sound}--\ref{thm:incomplete}) of what a proof-assistant audit does and does not
 establish. The honest scope is a semi-decision procedure for unsoundness: it strengthens confidence in
@@ -406,7 +443,75 @@ the fast, trusted path has gone wrong.
 \section*{Reproducibility}
 The ISA, pipeline, transformer executor, and the Lean-audit toolkit (mini runtime plus a runnable
 three-way example) accompany this paper. The worked audit is invoked with
-\texttt{python -m transformer_oracle.lean\_audit.example\_audit}; the practical guide is
+\texttt{python -m transformer\_oracle.lean\_audit.example\_audit}; the practical guide is
 \texttt{docs/auditing-lean-native-decide.md}.
+
+\begin{thebibliography}{99}
+
+\bibitem{demoura2021} L.~de~Moura and S.~Ullrich.
+  The Lean~4 theorem prover and programming language.
+  In \emph{Automated Deduction (CADE~28)}, LNCS 12699, Springer, 2021.
+
+\bibitem{dijkstra1970} E.~W.~Dijkstra.
+  Notes on structured programming. Technical Report EWD249, 1970.
+  (``Program testing can be used to show the presence of bugs, but never to show their absence.'')
+
+\bibitem{weiss2021} G.~Weiss, Y.~Goldberg, and E.~Yahav.
+  Thinking like transformers.
+  In \emph{Proc.\ 38th International Conference on Machine Learning (ICML)}, 2021.
+
+\bibitem{lindner2023} D.~Lindner, J.~Kram\'ar, S.~Farquhar, M.~Rahtz, T.~McGrath, and V.~Mikulik.
+  Tracr: Compiled transformers as a laboratory for interpretability.
+  In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2023.
+
+\bibitem{giannou2023} A.~Giannou, S.~Rajput, J.~Sohn, K.~Lee, J.~D.~Lee, and D.~Papailiopoulos.
+  Looped transformers as programmable computers.
+  In \emph{Proc.\ 40th International Conference on Machine Learning (ICML)}, 2023.
+
+\bibitem{vaswani2017} A.~Vaswani, N.~Shazeer, N.~Parmar, J.~Uszkoreit, L.~Jones, A.~N.~Gomez,
+  \L.~Kaiser, and I.~Polosukhin.
+  Attention is all you need.
+  In \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2017.
+
+\bibitem{mckeeman1998} W.~M.~McKeeman.
+  Differential testing for software.
+  \emph{Digital Technical Journal}, 10(1):100--107, 1998.
+
+\bibitem{yang2011} X.~Yang, Y.~Chen, E.~Eide, and J.~Regehr.
+  Finding and understanding bugs in C compilers.
+  In \emph{Proc.\ ACM SIGPLAN Conf.\ on Programming Language Design and Implementation (PLDI)}, 2011.
+
+\bibitem{chen1998} T.~Y.~Chen, S.~C.~Cheung, and S.~M.~Yiu.
+  Metamorphic testing: A new approach for generating next test cases.
+  Technical Report HKUST-CS98-01, Hong Kong University of Science and Technology, 1998.
+
+\bibitem{pnueli1998} A.~Pnueli, M.~Siegel, and E.~Singerman.
+  Translation validation.
+  In \emph{Tools and Algorithms for the Construction and Analysis of Systems (TACAS)}, LNCS 1384, 1998.
+
+\bibitem{leroy2009} X.~Leroy.
+  Formal verification of a realistic compiler.
+  \emph{Communications of the ACM}, 52(7):107--115, 2009.
+
+\bibitem{johansson2017} F.~Johansson.
+  Arb: Efficient arbitrary-precision midpoint-radius interval arithmetic.
+  \emph{IEEE Transactions on Computers}, 66(8):1281--1292, 2017.
+
+\bibitem{hochschild2021} P.~H.~Hochschild, P.~Turner, J.~C.~Mogul, R.~Govindaraju, P.~Ranganathan,
+  D.~E.~Culler, and A.~Vahdat.
+  Cores that don't count.
+  In \emph{Proc.\ Workshop on Hot Topics in Operating Systems (HotOS)}, 2021.
+
+\bibitem{dixit2021} H.~D.~Dixit, S.~Pendharkar, M.~Beadon, C.~Mason, T.~Chakravarthy, B.~Muthiah,
+  and S.~Sankar.
+  Silent data corruptions at scale.
+  arXiv:2102.11245, 2021.
+
+\bibitem{batteries1924} Batteries (Lean~4 standard library extensions), issue~\#1924:
+  \texttt{Vector.scanrM} \texttt{@[implemented\_by] scanrMFast} is incorrect (off-by-one);
+  \texttt{native\_decide} disagrees with the kernel.
+  \url{https://github.com/leanprover-community/batteries/issues/1924}.
+
+\end{thebibliography}
 
 \end{document}
