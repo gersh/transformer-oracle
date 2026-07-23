@@ -373,8 +373,18 @@ def _section_of(directive: str):
 
 
 def _resolve_reloc(kind: str, sym: str, data_symbols: dict[str, int]) -> int:
-    """Compute the numeric immediate for a %hi/%lo relocation of `sym`."""
-    addr = data_symbols.get(sym, 0)
+    """Compute the numeric immediate for a %hi/%lo relocation of `sym`.
+
+    `sym` may carry an addend, e.g. `.LC0+4` or `foo-8` (the assembler emits these to address a
+    word past a symbol, such as the high word of a 64-bit constant in .rodata). Parse and apply it;
+    otherwise the addend is silently dropped and the load hits the wrong word.
+    """
+    addend = 0
+    m = re.match(r'^(.*?)\s*([+-]\s*\d+)$', sym)
+    if m and m.group(1):
+        sym = m.group(1)
+        addend = int(m.group(2).replace(' ', ''))
+    addr = data_symbols.get(sym, 0) + addend
     if kind in ('hi', 'pcrel_hi'):
         return ((addr + 0x800) >> 12) & 0xFFFFF
     if kind in ('lo', 'pcrel_lo'):
