@@ -104,6 +104,16 @@ runs may share a defect. Obtaining a \emph{different} answer is a falsifier: it 
 path is wrong (\S\ref{sec:audit}). Every design choice below serves to make disagreements meaningful
 and to maximise the independence of the paths being compared.
 
+\subsection{Purpose, Motivation, and High-Level Intuition}
+Why do interactive theorem provers like Lean~4 require an independent execution oracle? 
+
+Modern formal verification increasingly relies on computation to discharge large proof goals (e.g., matrix arithmetic, graph reachability, or primality testing). Evaluating such computations inside a proof kernel's small-step interpreter is frequently bottlenecked by orders of magnitude. Consequently, proof assistants provide fast-path tactics like \texttt{native\_decide}, which compile higher-level decision procedures into native machine binaries that run directly on host CPU hardware.
+
+However, this performance optimization introduces a critical soundness vulnerability: \textbf{the trusted computing base (TCB) silently expands to include the host C compiler, thousands of lines of untrusted \texttt{@[extern]} or \texttt{@[implemented\_by]} C/Rust fast paths, and host physical CPU hardware}. A single compiler optimization bug, an off-by-one in an extern C routine, or a hardware memory bit-flip can cause \texttt{native\_decide} to accept a false proposition, permanently compromising the theorem prover's soundness.
+
+\textbf{Transformer-Oracle} solves this problem by providing an independent, deterministic execution substrate. Instead of trusting standard CPU hardware or host C compilers, Transformer-Oracle compiles machine code into a 40-opcode RISC-V derivative (NISA) and executes it on an \textbf{analytically constructed 10-layer transformer neural network}. By running identical or semantically equivalent algorithms inside a bipolar $\bp$ tensor space and cross-checking the outputs against independent mathematical oracles, Transformer-Oracle automatically isolates and falsifies bugs in compiled proof code without modifying the proof assistant's core kernel.
+
+
 \section{Background: \texttt{native\_decide} and its trust surface}\label{sec:background}
 
 Let $P$ be a proposition with an instance $d : \texttt{Decidable } P$. Reducing $d$ yields either
@@ -289,7 +299,17 @@ on \texttt{true}; for the perturbed $c'=c{+}1$ all three agree on \texttt{false}
 they witness that the check is not vacuously passing.
 \end{example}
 
+\subsection{Multi-Language Auditing: C, Rust/LLVM, and Lean}
+While the primary evaluation pipeline targets C emitted by Lean 4, the underlying RISC-V/NISA architecture is language-agnostic. Any language whose compiler targets 32-bit RISC-V integer instructions can be audited on the Transformer VM:
+
+\begin{itemize}[nosep]
+  \item \textbf{C Front-End}: Compiled via \texttt{gcc-riscv64-linux-gnu -march=rv32im -mabi=ilp32}.
+  \item \textbf{Rust Front-End (LLVM)}: Compiled via \texttt{rustc --target riscv32im-unknown-none-elf --emit asm} in \texttt{\#!no\_std} mode. This enables auditing Rust rewrites of proof assistant kernels, FFI extensions, or specialized data structures directly against host reference models.
+  \item \textbf{Python Front-End}: Compiled via an internal AST translator (\texttt{python\_compiler.py}) for rapid prototyping of algorithmic decision rules.
+\end{itemize}
+
 \section{The audit method}\label{sec:audit}
+
 
 Fix a decidable predicate with intended semantics $f : X \to \Bool$. Three evaluators approximate $f$:
 \[
@@ -351,6 +371,53 @@ the Dijkstra principle and it dictates the tactics used to enlarge coverage and 
       amd64 under emulation) and across compiler/toolchain versions; deterministic integer results must
       agree bit-for-bit. This is the only defence against the fault class of \S\ref{sec:threat}.
 \end{description}
+
+\section{Practical Workflow and How-To-Use Guide}\label{sec:workflow}
+
+To apply Transformer-Oracle to an arbitrary module, decision procedure, or kernel rewrite in practice, engineers and researchers follow a 4-step workflow:
+
+\subsection{Step 1: Isolate the Target Function}
+Identify the target decision procedure $d : \texttt{Decidable } P$, untrusted C/Rust \texttt{@[extern]} primitive, or kernel reduction routine under audit. For Lean modules, locate the C code emitted by Lean's compiler (found under \texttt{build/ir/} during compilation).
+
+\subsection{Step 2: Cross-Compile to RV32I Assembly}
+Compile the source code using the appropriate cross-compiler flags reserving scratch registers \texttt{x30}/\texttt{x31}:
+
+\begin{itemize}[nosep]
+  \item \textbf{C / Lean Emitted C}:
+\begin{lstlisting}[language=bash]
+riscv64-linux-gnu-gcc -march=rv32im -mabi=ilp32 -O1 -S -nostdlib \
+  -ffixed-x30 -ffixed-x31 target.c -o target.s
+\end{lstlisting}
+  \item \textbf{Rust (#![no_std])}:
+\begin{lstlisting}[language=bash]
+rustc --target riscv32im-unknown-none-elf --emit asm -C opt-level=1 \
+  -C llvm-args="-fixed-x30 -fixed-x31" lib.rs -o target.s
+\end{lstlisting}
+\end{itemize}
+
+\subsection{Step 3: Define the Independent Oracle & Invariants}
+Construct an independent oracle or metamorphic specification in Python. For mathematical propositions over integers or algebraic structures, use host Python \texttt{int}, \texttt{sympy}, or algebraic identity constraints:
+
+\begin{lstlisting}[language=python]
+# Metamorphic Oracle: Verify a * b == b * a on the Transformer VM
+from transformer_oracle.compiler.compiler import compile_and_run
+
+source_c = """
+int _start(void) {
+    long long a = 123456789LL, b = 987654321LL;
+    return (a * b) == (b * a);
+}
+"""
+res = compile_and_run(source_c, language="c", device="cpu")
+assert res.reg(10) == 1  # Register a0 holds Boolean result
+\end{lstlisting}
+
+\subsection{Step 4: Execute & Analyze Cycle Traces}
+Pass the generated assembly or source string into \texttt{compile\_and\_run(src, language="c", device="cpu")}. The executor translates RV32I to NISA, constructs the bipolar tensor weights, and executes the code step-by-step:
+\begin{itemize}[nosep]
+  \item \textbf{Verdict Check}: Compare the return register \texttt{a0} (\texttt{res.reg(10)}) against the oracle result.
+  \item \textbf{Trace Inspection}: In case of a divergence, inspect the cycle-by-cycle register and memory state trace to pinpoint the exact instruction cycle where host CPU execution and Transformer VM execution diverged.
+\end{itemize}
 
 \section{Threat model}\label{sec:threat}
 
