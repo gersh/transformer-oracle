@@ -111,6 +111,14 @@ python -m pytest transformer_oracle/tests -q
 
 The package imports as `transformer_oracle` from the repository root.
 
+## Documentation
+
+- 📄 **[Formal Paper (PDF)](docs/paper/transformer-oracle-lean-audit.pdf)** — Operational semantics, bipolar-transformer executor, and audit soundness argument.
+- 📘 **[Auditing Lean 4 `native_decide`](docs/auditing-lean-native-decide.md)** — Trust surface, differential/metamorphic methodology, and Lean runtime recipe.
+- 📐 **[Architecture & NISA ISA Specification](docs/architecture-and-nisa.md)** — Bipolar tensor state encoding, 40-opcode NISA ISA, and 10-layer analytical transformer execution.
+- 🛠️ **[Compiler Pipeline & Multi-Language Support](docs/compiler-and-multilang.md)** — Compiling C, Rust (via LLVM), and Python to NISA, with API reference.
+- 🔬 **[Auditing Paradigms & Falsification Methodology](docs/auditing-paradigms.md)** — Differential testing, metamorphic invariants, and property-based fuzzing.
+
 ## Repository layout
 
 | Path | Contents |
@@ -121,11 +129,11 @@ The package imports as `transformer_oracle` from the repository root.
 | `transformer_oracle/weights/` | Analytical weight builder — constructs transformer weights that execute NISA. |
 | `transformer_oracle/runtime/` | Executors: pure-tensor / GPU / CUDA transformer VMs, plus reference interpreters. |
 | `transformer_oracle/tests/` | Compiler, executor, and end-to-end program tests. |
-| `docs/` | The how-to guide and the [formal paper](docs/paper/). |
+| `docs/` | Complete documentation suite and [formal paper](docs/paper/). |
 
 ## Status
 
-The analytical transformer faithfully executes the full 40-opcode NISA ISA; the C→RV32I→NISA pipeline
+The analytical transformer faithfully executes the full 40-opcode NISA ISA; the C/Rust→RV32I→NISA pipeline
 compiles real programs; and the Lean-audit toolkit runs arbitrary-precision `Nat` decision procedures
 end-to-end on the transformer (`Int`/inductive layers are validated against a host reference build,
 with one known composed-`Int` miscompilation documented). Applying the same oracle/metamorphic method
